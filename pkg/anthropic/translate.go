@@ -97,12 +97,6 @@ func IsNativeAnthropicModel(model string) bool {
 
 func resolveNativeAnthropicModel(model string, accountDefault string, systemDefault string) string {
 	resolved := resolveModel(model, accountDefault, systemDefault)
-	if resolved == "Claude-Opus-4.7" {
-		return resolved
-	}
-	if IsNativeAnthropicModel(resolved) {
-		return "Claude-Opus-4.7"
-	}
 	return resolved
 }
 
@@ -184,10 +178,8 @@ func TranslateResponse(jcResp map[string]interface{}, reqModel string) *MessageR
 }
 
 func resolveModel(model string, accountDefault string, systemDefault string) string {
-	for _, m := range joycode.Models {
-		if m == model {
-			return model
-		}
+	if model != "" {
+		return model
 	}
 	if accountDefault != "" {
 		return accountDefault

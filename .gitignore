@@ -66,3 +66,10 @@ coverage.out
 web/node_modules/
 web/dist/
 joycode_proxy/static/
+
+# Runtime data (contains credentials — never commit)
+data/proxy.db
+*.db
+
+# Serena
+.serena/

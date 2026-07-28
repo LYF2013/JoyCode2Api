@@ -23,6 +23,18 @@ interface FieldConfig {
   tag?: string;
 }
 
+const FALLBACK_MODEL_OPTIONS = [
+  { label: 'JoyAI-Code', value: 'JoyAI-Code' },
+  { label: 'Claude-Opus-4.7', value: 'Claude-Opus-4.7' },
+  { label: 'GLM-5.1', value: 'GLM-5.1' },
+  { label: 'GLM-5', value: 'GLM-5' },
+  { label: 'GLM-4.7', value: 'GLM-4.7' },
+  { label: 'Kimi-K2.6', value: 'Kimi-K2.6' },
+  { label: 'Kimi-K2.5', value: 'Kimi-K2.5' },
+  { label: 'MiniMax-M2.7', value: 'MiniMax-M2.7' },
+  { label: 'Doubao-Seed-2.0-pro', value: 'Doubao-Seed-2.0-pro' },
+];
+
 const FIELD_GROUPS = [
   {
     title: '模型配置',
@@ -34,17 +46,7 @@ const FIELD_GROUPS = [
         tooltip: '当客户端未指定模型，且账号未配置默认模型时使用的 JoyCode 模型',
         placeholder: 'JoyAI-Code',
         type: 'select' as const,
-        options: [
-          { label: 'JoyAI-Code — 主力代码模型（推荐）', value: 'JoyAI-Code' },
-          { label: 'Claude-Opus-4.7', value: 'Claude-Opus-4.7' },
-          { label: 'GLM-5.1 — 智谱 GLM 5.1', value: 'GLM-5.1' },
-          { label: 'GLM-5 — 智谱 GLM 5', value: 'GLM-5' },
-          { label: 'GLM-4.7 — 智谱 GLM 4.7', value: 'GLM-4.7' },
-          { label: 'Kimi-K2.6 — Moonshot Kimi K2.6', value: 'Kimi-K2.6' },
-          { label: 'Kimi-K2.5 — Moonshot Kimi K2.5', value: 'Kimi-K2.5' },
-          { label: 'MiniMax-M2.7 — MiniMax M2.7', value: 'MiniMax-M2.7' },
-          { label: 'Doubao-Seed-2.0-pro — 豆包 Seed 2.0 Pro', value: 'Doubao-Seed-2.0-pro' },
-        ],
+        options: FALLBACK_MODEL_OPTIONS,
       },
       {
         key: 'default_max_tokens',
@@ -53,6 +55,14 @@ const FIELD_GROUPS = [
         placeholder: '8192',
         type: 'number' as const,
         tag: '已生效',
+      },
+      {
+        key: 'enable_claude',
+        label: '启用 Claude 原生通道',
+        tag: '已生效',
+        tooltip: '开启后，Claude 系列模型（claude-*）走 /api/saas/anthropic/v1/messages 原生通道，支持 Opus 4.8 等新模型。仅影响 Anthropic 协议（/v1/messages），对 OpenAI 协议（/v1/chat/completions）无影响。',
+        placeholder: 'false',
+        type: 'switch' as const,
       },
     ],
   },
@@ -114,13 +124,23 @@ const SettingsPage: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [changePwLoading, setChangePwLoading] = useState(false);
+  const [modelOptions, setModelOptions] = useState<{ label: string; value: string }[]>([]);
   const [form] = Form.useForm();
   const [pwForm] = Form.useForm();
 
   const fetchSettings = async () => {
     setLoading(true);
     try {
-      const data = await api.getSettings();
+      const [data, models] = await Promise.all([
+        api.getSettings(),
+        api.listModels().catch(() => null),
+      ]);
+      // 动态填充模型下拉，获取失败时用 fallback
+      if (models && models.length > 0) {
+        setModelOptions(models.map(m => ({ label: m.name, value: m.id })));
+      } else {
+        setModelOptions(FALLBACK_MODEL_OPTIONS);
+      }
       // 后端设置统一存为字符串。switch 字段需转回布尔再回填表单，
       // 否则存着的 "false"（字符串）会被当成 truthy 而显示成「开」，
       // 误导用户。判定与后端一致：!= "false" 即视为开启。
@@ -222,9 +242,10 @@ const SettingsPage: React.FC = () => {
           </Form.Item>
         );
       case 'select':
+        const opts = field.key === 'default_model' ? modelOptions : field.options;
         return (
           <Form.Item key={field.key} name={field.key} label={label}>
-            <Select placeholder={field.placeholder} options={field.options} allowClear disabled={field.readOnly} />
+            <Select placeholder={field.placeholder} options={opts} allowClear disabled={field.readOnly} />
           </Form.Item>
         );
       case 'switch':

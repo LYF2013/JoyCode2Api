@@ -21,8 +21,8 @@ import SvgClaudeCode from '../components/ClaudeCodeIcon';
 import SvgCodex from '../components/CodexIcon';
 import CommandTooltip from '../components/CommandTooltip';
 
-const BUILTIN_MODELS = [
-  { label: 'JoyAI-Code（推荐）', value: 'JoyAI-Code' },
+const FALLBACK_MODELS = [
+  { label: 'JoyAI-Code', value: 'JoyAI-Code' },
   { label: 'Claude-Opus-4.7', value: 'Claude-Opus-4.7' },
   { label: 'GLM-5.1', value: 'GLM-5.1' },
   { label: 'GLM-5', value: 'GLM-5' },
@@ -210,12 +210,9 @@ const AccountDetail: React.FC = () => {
   }
   if (!account) return <div style={{ textAlign: 'center', padding: 100 }}>账号不存在</div>;
 
-  const allModelOptions = [
-    ...BUILTIN_MODELS,
-    ...models
-      .filter((m) => !BUILTIN_MODELS.some((b) => b.value === m.id))
-      .map((m) => ({ label: m.name || m.id, value: m.id })),
-  ];
+  const allModelOptions = models.length > 0
+    ? models.map((m) => ({ label: m.name || m.id, value: m.id }))
+    : FALLBACK_MODELS;
 
   const filteredLogs = logFilter === 'all'
     ? logs

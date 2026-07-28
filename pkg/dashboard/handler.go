@@ -1312,6 +1312,33 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Try to fetch models from upstream via any available account
+	var account *store.Account
+	if def, err := h.store.GetDefaultAccount(); err != nil {
+		slog.Error("get default account for models", "error", err)
+	} else if def != nil {
+		account = def
+	}
+	if account == nil {
+		// No default account, try the first account in the list
+		if list, err := h.store.ListAccounts(); err != nil {
+			slog.Error("list accounts for models", "error", err)
+		} else if len(list) > 0 {
+			account, _ = h.store.GetAccount(list[0].UserID)
+		}
+	}
+	if account != nil {
+		client := joycode.NewClient(account.PtKey, account.UserID)
+		jcModels, err := client.ListModels()
+		if err != nil {
+			slog.Error("list models from upstream", "error", err)
+		} else {
+			writeJSON(w, http.StatusOK, map[string]interface{}{"models": jcModelInfos(jcModels)})
+			return
+		}
+	}
+
+	// Fallback to hardcoded list
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"models": modelInfos(h.modelList),
 	})
@@ -1321,6 +1348,18 @@ func modelInfos(models []string) []map[string]string {
 	result := make([]map[string]string, len(models))
 	for i, m := range models {
 		result[i] = map[string]string{"id": m, "name": m}
+	}
+	return result
+}
+
+func jcModelInfos(models []joycode.ModelInfo) []map[string]string {
+	result := make([]map[string]string, len(models))
+	for i, m := range models {
+		id := m.ChatAPIModel
+		if id == "" {
+			id = m.Label
+		}
+		result[i] = map[string]string{"id": id, "name": m.Label}
 	}
 	return result
 }

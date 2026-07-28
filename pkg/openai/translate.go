@@ -104,10 +104,8 @@ func newShortID() string {
 // If the client-specified model is a known JoyCode model, pass it through.
 // Otherwise fall back to the account's default model, then the global default.
 func ResolveModel(model string, accountDefault string, systemDefault string) string {
-	for _, m := range joycode.Models {
-		if m == model {
-			return model
-		}
+	if model != "" {
+		return model
 	}
 	if accountDefault != "" {
 		return accountDefault
