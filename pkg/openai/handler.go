@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"sync"
+	"time"
 
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/joycode"
 	"github.com/vibe-coding-labs/JoyCode2Api/pkg/store"
@@ -17,6 +19,11 @@ type Server struct {
 	Client   *joycode.Client
 	Resolver ClientResolver
 	store    *store.Store
+
+	// model adapter cache: model ID → adapterType, with TTL
+	adapterMu       sync.RWMutex
+	adapterMap      map[string]string
+	adapterFetchedAt time.Time
 }
 
 // NewServer creates a new OpenAI-compatible proxy server.
@@ -31,9 +38,50 @@ func (s *Server) getClient(r *http.Request) *joycode.Client {
 	return s.Client
 }
 
+// getAdapterType returns the adapter type for a model, using a cached model list
+// with a 10-minute TTL. On error returns "" (defaults to chat completions).
+func (s *Server) getAdapterType(client *joycode.Client, model string) string {
+	s.adapterMu.RLock()
+	if s.adapterMap != nil && time.Since(s.adapterFetchedAt) < 10*time.Minute {
+		at := s.adapterMap[model]
+		s.adapterMu.RUnlock()
+		return at
+	}
+	s.adapterMu.RUnlock()
+
+	// Fetch fresh model list
+	s.adapterMu.Lock()
+	defer s.adapterMu.Unlock()
+
+	// Double-check after acquiring write lock
+	if s.adapterMap != nil && time.Since(s.adapterFetchedAt) < 10*time.Minute {
+		return s.adapterMap[model]
+	}
+
+	models, err := client.ListModels()
+	if err != nil {
+		slog.Warn("failed to fetch model list for adapter type", "error", err)
+		return ""
+	}
+
+	m := make(map[string]string, len(models))
+	for _, mi := range models {
+		mid := mi.ModelID
+		if mid == "" {
+			mid = mi.Label
+		}
+		m[mid] = mi.AdapterType()
+	}
+	s.adapterMap = m
+	s.adapterFetchedAt = time.Now()
+
+	return m[model]
+}
+
 // RegisterRoutes registers all OpenAI-compatible endpoints on the mux.
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/v1/chat/completions", s.handleChat)
+	mux.HandleFunc("/v1/responses", s.handleResponses)
 	mux.HandleFunc("/v1/models", s.handleModels)
 	mux.HandleFunc("/v1/web-search", s.handleWebSearch)
 	mux.HandleFunc("/v1/rerank", s.handleRerank)
@@ -96,7 +144,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]interface{}{
 		"status": "ok", "service": "joycode-openai-proxy",
 		"endpoints": []string{
-			"/v1/chat/completions", "/v1/models",
+			"/v1/chat/completions", "/v1/responses", "/v1/models",
 			"/v1/web-search", "/v1/rerank",
 		},
 	})

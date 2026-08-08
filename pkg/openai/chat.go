@@ -30,9 +30,20 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		systemDefault = s.store.GetSetting("default_model")
 	}
 	model := ResolveModel(req.Model, store.GetAccountDefaultModel(r), systemDefault)
-		store.SetModel(r, model)
-		jcBody := TranslateRequest(&req)
+	store.SetModel(r, model)
 	client := s.getClient(r)
+
+	// For openai-response adapter models, the upstream API expects the model
+	// name in lowercase with spaces replaced by hyphens (e.g. "GPT-5.6 Sol" → "gpt-5.6-sol").
+	adapterType := s.getAdapterType(client, model)
+	if adapterType == "openai-response" {
+		converted := strings.ToLower(strings.ReplaceAll(model, " ", "-"))
+		req.Model = converted
+		model = converted
+	}
+
+	jcBody := TranslateRequest(&req)
+
 	if req.Stream {
 		s.handleStreamChat(w, r, client, jcBody, model)
 	} else {
