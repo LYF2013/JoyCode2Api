@@ -341,3 +341,131 @@ func (m *mockResponseWriter) Write(b []byte) (int, error) {
 }
 
 func (m *mockResponseWriter) WriteHeader(code int) {}
+
+func TestTranslateResponsesToChat_FunctionCallItems(t *testing.T) {
+	// Simulates the second turn of a tool-using conversation: the input
+	// array carries the assistant's prior function_call and the tool's
+	// function_call_output. These MUST be translated, otherwise the model
+	// loses the tool result and loops re-invoking the same tool.
+	req := &ResponsesRequest{
+		Model: "GLM-5.2",
+		Input: json.RawMessage(`[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"read the file"}]},
+			{"type":"function_call","call_id":"call_1","name":"shell","arguments":"{\"command\":[\"cat\",\"a.txt\"]}"},
+			{"type":"function_call_output","call_id":"call_1","output":"file contents here"},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"summarize it"}]}
+		]`),
+	}
+
+	body := translateResponsesToChat(req)
+	messages := body["messages"].([]interface{})
+
+	if len(messages) != 4 {
+		t.Fatalf("expected 4 messages, got %d", len(messages))
+	}
+
+	// 1: user "read the file"
+	if m, _ := messages[0].(map[string]interface{}); m["role"] != "user" || m["content"] != "read the file" {
+		t.Errorf("message[0] wrong: %v", messages[0])
+	}
+
+	// 2: assistant with tool_calls
+	assistant, _ := messages[1].(map[string]interface{})
+	if assistant["role"] != "assistant" {
+		t.Errorf("expected assistant role, got %v", assistant["role"])
+	}
+	toolCalls, _ := assistant["tool_calls"].([]interface{})
+	if len(toolCalls) != 1 {
+		t.Fatalf("expected 1 tool_call, got %d", len(toolCalls))
+	}
+	tc, _ := toolCalls[0].(map[string]interface{})
+	if tc["id"] != "call_1" {
+		t.Errorf("expected tool call id=call_1, got %v", tc["id"])
+	}
+	fn, _ := tc["function"].(map[string]interface{})
+	if fn["name"] != "shell" {
+		t.Errorf("expected name=shell, got %v", fn["name"])
+	}
+	if fn["arguments"] != `{"command":["cat","a.txt"]}` {
+		t.Errorf("expected arguments, got %v", fn["arguments"])
+	}
+
+	// 3: tool result keyed by tool_call_id
+	tool, _ := messages[2].(map[string]interface{})
+	if tool["role"] != "tool" {
+		t.Errorf("expected tool role, got %v", tool["role"])
+	}
+	if tool["tool_call_id"] != "call_1" {
+		t.Errorf("expected tool_call_id=call_1, got %v", tool["tool_call_id"])
+	}
+	if tool["content"] != "file contents here" {
+		t.Errorf("expected tool output content, got %v", tool["content"])
+	}
+
+	// 4: user "summarize it"
+	if m, _ := messages[3].(map[string]interface{}); m["role"] != "user" || m["content"] != "summarize it" {
+		t.Errorf("message[3] wrong: %v", messages[3])
+	}
+}
+
+func TestTranslateResponsesToChat_StringContent(t *testing.T) {
+	// Some clients send message content as a plain string rather than a
+	// typed array; this should still translate.
+	req := &ResponsesRequest{
+		Model: "GLM-5.2",
+		Input: json.RawMessage(`[{"type":"message","role":"user","content":"hello plain"}]`),
+	}
+	body := translateResponsesToChat(req)
+	messages := body["messages"].([]interface{})
+	msg, _ := messages[0].(map[string]interface{})
+	if msg["content"] != "hello plain" {
+		t.Errorf("expected 'hello plain', got %v", msg["content"])
+	}
+}
+
+func TestTranslateResponsesToChat_ParallelFunctionCalls(t *testing.T) {
+	// Consecutive function_call items must merge into ONE assistant message
+	// with multiple tool_calls. If they become separate assistant messages,
+	// the upstream API may reject the request or the model loses context.
+	req := &ResponsesRequest{
+		Model: "GLM-5.2",
+		Input: json.RawMessage(`[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"read both files"}]},
+			{"type":"function_call","call_id":"call_1","name":"shell","arguments":"{\"command\":\"cat a\"}"},
+			{"type":"function_call","call_id":"call_2","name":"shell","arguments":"{\"command\":\"cat b\"}"},
+			{"type":"function_call_output","call_id":"call_1","output":"contents A"},
+			{"type":"function_call_output","call_id":"call_2","output":"contents B"},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"summarize"}]}
+		]`),
+	}
+	body := translateResponsesToChat(req)
+	messages := body["messages"].([]interface{})
+
+	// user + assistant(merged) + tool + tool + user = 5
+	if len(messages) != 5 {
+		t.Fatalf("expected 5 messages, got %d: %v", len(messages), messages)
+	}
+
+	assistant, _ := messages[1].(map[string]interface{})
+	if assistant["role"] != "assistant" {
+		t.Fatalf("expected assistant, got %v", assistant["role"])
+	}
+	toolCalls, _ := assistant["tool_calls"].([]interface{})
+	if len(toolCalls) != 2 {
+		t.Fatalf("expected 2 tool_calls in one assistant message, got %d", len(toolCalls))
+	}
+	// content should be present (nil) for Chat Completions compatibility
+	if _, ok := assistant["content"]; !ok {
+		t.Error("assistant message with tool_calls must have content field (even if nil)")
+	}
+
+	// Both tool results present
+	tool1, _ := messages[2].(map[string]interface{})
+	if tool1["tool_call_id"] != "call_1" || tool1["content"] != "contents A" {
+		t.Errorf("tool result 1 wrong: %v", messages[2])
+	}
+	tool2, _ := messages[3].(map[string]interface{})
+	if tool2["tool_call_id"] != "call_2" || tool2["content"] != "contents B" {
+		t.Errorf("tool result 2 wrong: %v", messages[3])
+	}
+}

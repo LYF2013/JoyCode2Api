@@ -33,10 +33,17 @@ type ResponsesRequest struct {
 }
 
 // responsesInputItem represents one entry in the Responses API "input" array.
+// Input items are polymorphic: they can be messages, assistant function calls,
+// or function call outputs. Content/Output are kept as RawMessage so we can
+// handle both the plain-string and the typed-array content forms.
 type responsesInputItem struct {
-	Type    string             `json:"type"`              // "message"
-	Role    string             `json:"role"`              // "user", "assistant", "developer", "system"
-	Content []responsesContent `json:"content,omitempty"` // for type=message
+	Type      string          `json:"type"`                // "message", "function_call", "function_call_output"
+	Role      string          `json:"role,omitempty"`      // for type=message
+	Content   json.RawMessage `json:"content,omitempty"`   // for type=message (string or array)
+	CallID    string          `json:"call_id,omitempty"`   // for function_call / function_call_output
+	Name      string          `json:"name,omitempty"`      // for function_call
+	Arguments string          `json:"arguments,omitempty"` // for function_call
+	Output    json.RawMessage `json:"output,omitempty"`    // for function_call_output (string or object)
 }
 
 // responsesContent is one content part in an input message.
@@ -92,6 +99,7 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 
 	// Default path: translate Responses API → Chat Completions, then convert back.
 	chatBody := translateResponsesToChat(&req)
+
 	if req.Stream {
 		s.handleResponsesStream(w, r, client, chatBody, model)
 	} else {
@@ -131,12 +139,7 @@ func translateResponsesToChat(req *ResponsesRequest) map[string]interface{} {
 		} else {
 			var items []responsesInputItem
 			if err := json.Unmarshal(req.Input, &items); err == nil {
-				for _, item := range items {
-					msg := translateInputItem(item)
-					if msg != nil {
-						messages = append(messages, msg)
-					}
-				}
+				messages = translateInputItems(items, messages)
 			}
 		}
 	}
@@ -191,30 +194,106 @@ func translateResponsesToChat(req *ResponsesRequest) map[string]interface{} {
 	return body
 }
 
-// translateInputItem converts a Responses API input item to a Chat Completions message.
-func translateInputItem(item responsesInputItem) map[string]interface{} {
-	if item.Type != "message" {
-		return nil
-	}
+// translateInputItems converts Responses API input items to Chat Completions
+// messages. Consecutive function_call items are merged into a single assistant
+// message with multiple tool_calls entries — this is required by the Chat
+// Completions API and prevents the model from re-invoking tools it already
+// called. function_call_output items become "tool" role messages. Reasoning
+// items are skipped.
+func translateInputItems(items []responsesInputItem, messages []interface{}) []interface{} {
+	for i := 0; i < len(items); i++ {
+		item := items[i]
 
-	role := item.Role
-	if role == "developer" {
-		role = "system"
-	}
+		switch item.Type {
+		case "message", "":
+			role := item.Role
+			if role == "developer" {
+				role = "system"
+			}
+			messages = append(messages, map[string]interface{}{
+				"role":    role,
+				"content": extractResponsesContent(item.Content),
+			})
 
-	// Extract text from content parts.
-	var textParts []string
-	for _, c := range item.Content {
-		if c.Type == "input_text" || c.Type == "output_text" {
-			textParts = append(textParts, c.Text)
+		case "function_call":
+			// Collect all consecutive function_call items into one assistant
+			// message with a tool_calls array.
+			toolCalls := make([]interface{}, 0, 1)
+			for i < len(items) && items[i].Type == "function_call" {
+				tc := items[i]
+				toolCalls = append(toolCalls, map[string]interface{}{
+					"id":   tc.CallID,
+					"type": "function",
+					"function": map[string]interface{}{
+						"name":      tc.Name,
+						"arguments": tc.Arguments,
+					},
+				})
+				i++
+			}
+			i-- // compensate for the outer loop's i++
+			messages = append(messages, map[string]interface{}{
+				"role":       "assistant",
+				"content":    nil, // required by Chat Completions even when null
+				"tool_calls": toolCalls,
+			})
+
+		case "function_call_output":
+			messages = append(messages, map[string]interface{}{
+				"role":         "tool",
+				"tool_call_id": item.CallID,
+				"content":      extractResponsesOutput(item.Output),
+			})
+
+		default:
+			// "reasoning" and other types are dropped.
 		}
 	}
-	content := strings.Join(textParts, "\n")
+	return messages
+}
 
-	return map[string]interface{}{
-		"role":    role,
-		"content": content,
+// extractResponsesContent parses a Responses API message "content" field, which
+// may be either a plain string or an array of typed parts
+// (input_text/output_text).
+func extractResponsesContent(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
 	}
+	// Plain string form.
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	// Array of content parts form.
+	var parts []responsesContent
+	if err := json.Unmarshal(raw, &parts); err == nil {
+		var textParts []string
+		for _, p := range parts {
+			if p.Type == "input_text" || p.Type == "output_text" || p.Type == "text" {
+				textParts = append(textParts, p.Text)
+			}
+		}
+		return strings.Join(textParts, "\n")
+	}
+	return ""
+}
+
+// extractResponsesOutput parses a function_call_output "output" field, which is
+// usually a string but may be a JSON object on some clients.
+func extractResponsesOutput(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	var obj interface{}
+	if err := json.Unmarshal(raw, &obj); err == nil {
+		b, _ := json.Marshal(obj)
+		return string(b)
+	}
+	return ""
 }
 
 // ---------------------------------------------------------------------------
@@ -415,6 +494,7 @@ func (s *Server) handleResponsesStream(w http.ResponseWriter, r *http.Request, c
 	messageStarted := false
 	contentPartStarted :=
 		false
+	completed := false
 	var fullText strings.Builder
 	toolCalls := map[int]*toolCallState{}
 	var inTk, outTk int
@@ -533,74 +613,27 @@ func (s *Server) handleResponsesStream(w http.ResponseWriter, r *http.Request, c
 
 		// --- Finish ---
 		if choice.FinishReason != nil {
-
-			// Close text content part + message item if started
-			if contentPartStarted {
-				writeSSEEvent(w, "response.output_text.done", map[string]interface{}{
-					"output_index": 0, "content_index": 0, "text": fullText.String(),
-				})
-				flusher.Flush()
-				writeSSEEvent(w, "response.content_part.done", map[string]interface{}{
-					"output_index": 0, "content_index": 0,
-					"part": map[string]interface{}{"type": "output_text", "text": fullText.String()},
-				})
-				flusher.Flush()
-				writeSSEEvent(w, "response.output_item.done", map[string]interface{}{
-					"output_index": 0,
-					"item": map[string]interface{}{
-						"type": "message", "id": msgID, "status": "completed",
-						"role": "assistant",
-						"content": []interface{}{
-							map[string]interface{}{"type": "output_text", "text": fullText.String()},
-						},
-					},
-				})
-				flusher.Flush()
-			}
-
-			// Close tool call items
-			for idx, state := range toolCalls {
-				callID := state.id
-				if callID == "" {
-					callID = "call_" + newShortID()
-				}
-				writeSSEEvent(w, "response.function_call_arguments.done", map[string]interface{}{
-					"output_index": idx + 1, "arguments": state.arguments,
-				})
-				flusher.Flush()
-				writeSSEEvent(w, "response.output_item.done", map[string]interface{}{
-					"output_index": idx + 1,
-					"item": map[string]interface{}{
-						"type": "function_call", "id": callID, "status": "completed",
-						"call_id": callID, "name": state.name, "arguments": state.arguments,
-					},
-				})
-				flusher.Flush()
-			}
-
-			// Build final output array for response.completed
-			finalOutput := buildFinalOutput(msgID, fullText.String(), toolCalls)
-
-			writeSSEEvent(w, "response.completed", map[string]interface{}{
-				"response": map[string]interface{}{
-					"id":     respID,
-					"object": "response",
-					"status": "completed",
-					"model":  model,
-					"output": finalOutput,
-					"usage": map[string]interface{}{
-						"input_tokens":  inTk,
-						"output_tokens": outTk,
-						"total_tokens":  inTk + outTk,
-					},
-				},
-			})
-			flusher.Flush()
+			finishResponse(w, flusher, msgID, contentPartStarted, fullText.String(), toolCalls, respID, model, inTk, outTk, "completed")
+			completed = true
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
 		slog.Error("responses stream read error", "model", model, "error", err)
+	}
+
+	// Upstream closed the stream without a finish_reason. Some providers
+	// (e.g. GPT-5.6 Sol) end the SSE stream with [DONE] but never emit a
+	// finish_reason chunk, even though the content is complete. Codex CLI
+	// waits for response.completed; if we don't emit one it reports
+	// "stream disconnected before completion" and shows no output.
+	// Synthesize a completion with whatever content we accumulated. We use
+	// status "completed" (not "incomplete") so Codex treats the turn as done
+	// and surfaces the content to the user.
+	if !completed {
+		slog.Info("responses stream ended without finish_reason, synthesizing completion",
+			"model", model, "text_len", fullText.Len(), "tool_calls", len(toolCalls))
+		finishResponse(w, flusher, msgID, contentPartStarted, fullText.String(), toolCalls, respID, model, inTk, outTk, "completed")
 	}
 
 	// Ensure the stream terminates with [DONE]. Clients like Codex CLI expect
@@ -611,6 +644,74 @@ func (s *Server) handleResponsesStream(w http.ResponseWriter, r *http.Request, c
 	if inTk > 0 || outTk > 0 {
 		store.SetTokenUsage(r, inTk, outTk)
 	}
+}
+
+// finishResponse emits the closing SSE events for a stream: text/tool item
+// done events, then response.completed. Used both for normal completion (status
+// "completed") and for streams the upstream closed prematurely (status
+// "incomplete"), so Codex CLI always receives response.completed.
+func finishResponse(w http.ResponseWriter, flusher http.Flusher, msgID string, contentPartStarted bool, text string, toolCalls map[int]*toolCallState, respID, model string, inTk, outTk int, status string) {
+	// Close text content part + message item if started
+	if contentPartStarted {
+		writeSSEEvent(w, "response.output_text.done", map[string]interface{}{
+			"output_index": 0, "content_index": 0, "text": text,
+		})
+		flusher.Flush()
+		writeSSEEvent(w, "response.content_part.done", map[string]interface{}{
+			"output_index": 0, "content_index": 0,
+			"part": map[string]interface{}{"type": "output_text", "text": text},
+		})
+		flusher.Flush()
+		writeSSEEvent(w, "response.output_item.done", map[string]interface{}{
+			"output_index": 0,
+			"item": map[string]interface{}{
+				"type": "message", "id": msgID, "status": "completed",
+				"role": "assistant",
+				"content": []interface{}{
+					map[string]interface{}{"type": "output_text", "text": text},
+				},
+			},
+		})
+		flusher.Flush()
+	}
+
+	// Close tool call items
+	for idx, state := range toolCalls {
+		callID := state.id
+		if callID == "" {
+			callID = "call_" + newShortID()
+		}
+		writeSSEEvent(w, "response.function_call_arguments.done", map[string]interface{}{
+			"output_index": idx + 1, "arguments": state.arguments,
+		})
+		flusher.Flush()
+		writeSSEEvent(w, "response.output_item.done", map[string]interface{}{
+			"output_index": idx + 1,
+			"item": map[string]interface{}{
+				"type": "function_call", "id": callID, "status": "completed",
+				"call_id": callID, "name": state.name, "arguments": state.arguments,
+			},
+		})
+		flusher.Flush()
+	}
+
+	finalOutput := buildFinalOutput(msgID, text, toolCalls)
+
+	writeSSEEvent(w, "response.completed", map[string]interface{}{
+		"response": map[string]interface{}{
+			"id":     respID,
+			"object": "response",
+			"status": status,
+			"model":  model,
+			"output": finalOutput,
+			"usage": map[string]interface{}{
+				"input_tokens":  inTk,
+				"output_tokens": outTk,
+				"total_tokens":  inTk + outTk,
+			},
+		},
+	})
+	flusher.Flush()
 }
 
 // buildFinalOutput constructs the output array for response.completed.
