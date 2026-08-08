@@ -42,6 +42,20 @@ go test ./...         # 测试通过
 
 ## 关键约定
 
-- 模型名对外用展示名（`/v1/models` 返回的 label），但上游实际请求名可能不同（如 `Claude-Opus-4.8` 的真实 API 名是 `Claude-Opus-4.8-hq`）。真实名只在本机 JoyCode IDE 的 `state.vscdb` 里能查到。代理层对模型名原样透传，不做映射。
-- Claude 系列模型走 `/v1/messages` 原生 Anthropic 通道，需 `enable_claude=true`（Dashboard 系统设置里可开）；对 `/v1/chat/completions`（OpenAI 协议）无影响。
+- 模型名对外用展示名（`/v1/models` 返回的 label），但上游实际请求名可能不同。代理层根据 `adapterType` 自动处理：
+  - `adapterType: ""`（默认）→ 直接用 label，走 `/api/saas/openai/v1/chat/completions`
+  - `adapterType: "openai-response"` → 模型名转小写连字符（`GPT-5.6 Sol` → `gpt-5.6-sol`），仍走 chat completions 端点
+  - `adapterType: "anthropic"` → Claude 模型走 `/v1/messages` 原生 Anthropic 通道，需 `enable_claude=true`（Dashboard 系统设置里可开）
+- Claude 系列模型对 `/v1/chat/completions`（OpenAI 协议）返回 `choices: null`，上游普通 SaaS 通道不支持该模型。
 - 模型解析优先级：客户端指定 → 账号默认 → 系统默认 → `joycode.DefaultModel`。
+
+## 模型问题排查方法论
+
+模型调用返回空（`choices: null`、`usage: null`）或报错时，按以下步骤排查：
+
+1. **查模型列表**：`curl http://localhost:34891/v1/models -H "Authorization: Bearer joycode"` 确认模型在列表中
+2. **查 adapterType**：上游模型列表的 `ext` 字段含 `adapterType`，决定模型走哪个通道。可通过上游 `modelList` API 获取原始数据
+3. **测 chat completions 端点**：`curl -X POST /v1/chat/completions` 用不同模型名变体（原名、小写、带后缀）测试
+4. **测 responses 端点**：`curl -X POST /v1/responses` 测试 Responses API 格式
+5. **对比正常模型**：用已知可用的模型（如 `GLM-5.2`）对比，排除是代理层还是上游的问题
+6. **关键区别**：`choices: null` = 上游不接受该模型名或端点；`code: 1032` = 端点正确但请求格式/模型名不对；`code: 6002` = 模型名不存在
