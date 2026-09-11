@@ -31,6 +31,7 @@ var ModelCapabilities = map[string]ModelCapability{
 	"MiniMax-M2.7":        {Reasoning: true, MaxTokens: 16384, Ctx: 200000},
 	"Kimi-K2.5":           {Vision: true, MaxTokens: 16384, Ctx: 200000},
 	"Kimi-K2.6":           {Vision: true, Reasoning: true, MaxTokens: 16384, Ctx: 200000},
+	"Kimi-K3":             {Reasoning: true, MaxTokens: 16384, Ctx: 200000},
 	"GLM-5.1":             {Reasoning: true, MaxTokens: 16384, Ctx: 200000},
 	"GLM-5":               {MaxTokens: 8192, Ctx: 200000},
 	"GLM-4.7":             {MaxTokens: 8192, Ctx: 200000},
