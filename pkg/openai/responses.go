@@ -86,16 +86,16 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	client := s.getClient(r)
 	adapterType := s.getAdapterType(client, model)
 
-	// For openai-response adapter models, the upstream API expects the model
-	// name in lowercase with spaces replaced by hyphens (e.g. "GPT-5.6 Sol" → "gpt-5.6-sol").
-	if adapterType == "openai-response" {
-		converted := strings.ToLower(strings.ReplaceAll(model, " ", "-"))
-		req.Model = converted
-		model = converted
-	}
-
 	slog.Info("responses request",
 		"model", req.Model, "resolved", model, "stream", req.Stream, "adapter", adapterType)
+
+	// openai-response adapter models (GPT-5.6 Sol, GPT-6 Astra) are served by
+	// the native upstream Responses API channel — forward as-is instead of
+	// translating to chat completions.
+	if adapterType == "openai-response" {
+		s.handleResponsesNative(w, r, client, &req, model)
+		return
+	}
 
 	// Default path: translate Responses API → Chat Completions, then convert back.
 	chatBody := translateResponsesToChat(&req)

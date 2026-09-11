@@ -44,10 +44,14 @@ go test ./...         # 测试通过
 
 - 模型名对外用展示名（`/v1/models` 返回的 label），但上游实际请求名可能不同。代理层根据 `adapterType` 自动处理：
   - `adapterType: ""`（默认）→ 直接用 label，走 `/api/saas/openai/v1/chat/completions`
-  - `adapterType: "openai-response"` → 模型名转小写连字符（`GPT-5.6 Sol` → `gpt-5.6-sol`），仍走 chat completions 端点
+  - `adapterType: "openai-response"` → GPT 模型（GPT-5.6 Sol、GPT-6 Astra）走原生 Responses 通道（color 网关 `responses_completions`），模型名用 label 原名（**不要**转小写连字符），请求为真 Responses 格式（`input` 而非 `messages`），响应是嵌套 SSE（外层 `data:` 包裹内层 SSE 行），代理由 `pkg/openai/upstream_responses.go` 解包并翻译
   - `adapterType: "anthropic"` → Claude 模型走 `/v1/messages` 原生 Anthropic 通道，需 `enable_claude=true`（Dashboard 系统设置里可开）
 - Claude 系列模型对 `/v1/chat/completions`（OpenAI 协议）返回 `choices: null`，上游普通 SaaS 通道不支持该模型。
 - 模型解析优先级：客户端指定 → 账号默认 → 系统默认 → `joycode.DefaultModel`。
+- **查询模型真实请求名**：上游 `modelList` 接口同时返回 `label`（展示名）和 `chatApiModel`（上游真实请求名），两者可能不同，如 `Claude-Opus-5`（label）→ `Claude-Opus-5-hq`（chatApiModel）。最便捷的查询方式：`./JoyCode2Api models`（本机 auto-detect 凭据，输出 `label (chatApiModel)`）。
+  - 排查模型连通性时，若 label 走不通，务必换用 `chatApiModel` 重试（如 Claude 系列的 `-hq` 后缀名）。
+  - 已知差异（2026-09 实测）：Claude 系列 `Claude-Opus-5` → `Claude-Opus-5-hq`、`Claude-Opus-4.8` → `Claude-Opus-4.8-hq`；其余模型 label = chatApiModel。
+  - 注意：请求链路目前**不会**自动把 label 映射为 chatApiModel（`chatApiModel` 仅用于 `models` 命令和 Dashboard 展示），客户端须显式传真实请求名，否则上游断连（`read first line: EOF`）。
 
 ## 模型问题排查方法论
 
@@ -59,3 +63,6 @@ go test ./...         # 测试通过
 4. **测 responses 端点**：`curl -X POST /v1/responses` 测试 Responses API 格式
 5. **对比正常模型**：用已知可用的模型（如 `GLM-5.2`）对比，排除是代理层还是上游的问题
 6. **关键区别**：`choices: null` = 上游不接受该模型名或端点；`code: 1032` = 端点正确但请求格式/模型名不对；`code: 6002` = 模型名不存在
+7. **查 label ↔ chatApiModel 映射**：`./JoyCode2Api models` 输出 `label (chatApiModel)`。若两者不同，客户端传的 label 可能不是上游认的名字——改用 chatApiModel 重试（典型：Claude 系列需 `-hq` 后缀名，否则原生通道直接 EOF）
+8. **查运行日志**：`~/.joycode-proxy/logs/stderr.log` 里有上游 TTFB、错误详情和 request_id；`request_logs` 表有每个请求的状态码与错误信息
+9. **区分通道问题与模型问题**：同一 adapter 家族的另一个模型（如 GPT-5.6 Sol 对照 GPT-6 Astra）能通 → 通道没问题，是该模型上游不可用（未开通/服务未就绪）；整个通道的模型都不通 → 查凭证或通道配置

@@ -33,13 +33,12 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	store.SetModel(r, model)
 	client := s.getClient(r)
 
-	// For openai-response adapter models, the upstream API expects the model
-	// name in lowercase with spaces replaced by hyphens (e.g. "GPT-5.6 Sol" → "gpt-5.6-sol").
-	adapterType := s.getAdapterType(client, model)
-	if adapterType == "openai-response" {
-		converted := strings.ToLower(strings.ReplaceAll(model, " ", "-"))
-		req.Model = converted
-		model = converted
+	// openai-response adapter models (GPT-5.6 Sol, GPT-6 Astra) are served by
+	// the native upstream Responses API channel; the chat-completions gateway
+	// returns 6002 (模型不存在) for them.
+	if s.getAdapterType(client, model) == "openai-response" {
+		s.handleChatViaNativeResponses(w, r, client, &req, model)
+		return
 	}
 
 	jcBody := TranslateRequest(&req)
