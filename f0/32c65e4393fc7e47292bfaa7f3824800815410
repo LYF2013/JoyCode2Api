@@ -1,0 +1,22 @@
+README.md
+  h_e96d4b26514466 124,141,263-273,289,429-430
+ROADMAP.md
+  h_e96d4b26514466 11-15,61
+docker-compose.example.yml
+  h_e96d4b26514466 17-19
+pkg/auth/credentials.go
+  h_e96d4b26514466 38-40,43-59,64-66,75-81,109-134
+pkg/dashboard/handler.go
+  h_e96d4b26514466 645,833
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "f032c65e4393fc7e47292bfaa7f3824800815410",
+  "prompts": {},
+  "humans": {
+    "h_e96d4b26514466": {
+      "author": "liyufei11 <liyufei@jd.com>"
+    }
+  }
+}
