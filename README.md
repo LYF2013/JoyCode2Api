@@ -121,7 +121,7 @@ CGO_ENABLED=0 go build -o JoyCode2Api ./cmd/JoyCode2Api/
     http://0.0.0.0:34891 — Web UI
 ```
 
-> **macOS 且已装 JoyCode IDE**：可以不加 `--skip-validation`，程序会自动从 `~/Library/Application Support/JoyCode/User/globalStorage/state.vscdb` 读取已登录凭据。其他平台首次启动一律加 `--skip-validation`。
+> **macOS 且已装 JoyCode IDE**：可以不加 `--skip-validation`，程序会自动从 `~/.joycode/auth.json`（新版 IDE 0.3+）或 `~/Library/Application Support/JoyCode/User/globalStorage/state.vscdb`（旧版 IDE）读取已登录凭据。其他平台首次启动一律加 `--skip-validation`。
 
 ### 第 3 步：配置 Dashboard
 
@@ -138,7 +138,7 @@ CGO_ENABLED=0 go build -o JoyCode2Api ./cmd/JoyCode2Api/
 |------|------|----------|
 | **扫码登录**（推荐） | 点「扫码添加」，用**京东 App**（不是 JoyCode）扫二维码，手机确认后自动入库 | 有京东 App、最简单 |
 | **OAuth 授权** | 点「OAuth授权登录」，跳转 JoyCode 页面完成授权 | 浏览器能访问 JoyCode |
-| **手动添加** | 直接填 `pt_key` + `user_id` | 已有凭据，从 `state.vscdb` 或 OAuth 回调 URL 取 |
+| **手动添加** | 直接填 `pt_key` + `user_id` | 已有凭据，从 `~/.joycode/auth.json`（新版 IDE）、`state.vscdb`（旧版）或 OAuth 回调 URL 取 |
 
 **OAuth 在 Docker / 远程部署时**：浏览器会跳转到一个打不开的 `localhost` 页面，这是正常的。把地址栏里完整的 URL（形如 `http://127.0.0.1:34891/?pt_key=xxx&...`）复制下来，粘进弹窗输入框，点「提交授权」。
 
@@ -260,7 +260,17 @@ docker build \
 
 `go mod download` 慢的话构建时设 `GOPROXY=https://goproxy.cn,direct`。
 
-**挂载本地凭据（可选）**：宿主机装了 JoyCode IDE 的话，把状态库挂进容器，Dashboard 的「一键导入」就能用：
+**挂载本地凭据（可选）**：宿主机装了 JoyCode IDE 的话，把登录态文件挂进容器，Dashboard 的「一键导入」就能用。
+
+新版 JoyCode IDE（0.3+）登录态存在 `~/.joycode/auth.json`：
+
+```bash
+docker run -p 34891:34891 \
+  -v ~/.joycode/auth.json:/root/.joycode/auth.json:ro \
+  joycode2api serve --skip-validation
+```
+
+旧版 IDE 用状态库 `state.vscdb`（通过 `JOYCODE_STATE_DB` 指定）：
 
 ```bash
 docker run -p 34891:34891 \
@@ -276,7 +286,7 @@ cp docker-compose.example.yml docker-compose.yml
 docker compose up -d --build
 ```
 
-> **注意：** Docker / Linux 环境通常拿不到宿主机本地 JoyCode 登录态，所以 Compose 示例默认使用 `serve --skip-validation` 先把 Dashboard 启起来，再在页面里完成 OAuth 授权登录。运行数据会保存在 `./joycode-data/`。要挂载本地凭据，可在 `docker-compose.example.yml` 里取消 `state.vscdb` 挂载行的注释并改成实际路径。
+> **注意：** Docker / Linux 环境通常拿不到宿主机本地 JoyCode 登录态，所以 Compose 示例默认使用 `serve --skip-validation` 先把 Dashboard 启起来，再在页面里完成 OAuth 授权登录。运行数据会保存在 `./joycode-data/`。要挂载本地凭据，可在 `docker-compose.example.yml` 里取消 `auth.json`（新版 IDE）或 `state.vscdb`（旧版 IDE）挂载行的注释并改成实际路径。
 
 ### 系统服务
 
@@ -416,8 +426,8 @@ web/                    前端源码（React 19 + Ant Design 6 + Vite 8）
 <details>
 <summary><b>macOS 上能自动读取凭据，其他平台为什么不行</b></summary>
 
-程序通过读取 JoyCode IDE 的 `state.vscdb`（SQLite）获取已登录凭据。macOS 上路径固定在 `~/Library/Application Support/JoyCode/User/globalStorage/state.vscdb`，能自动找到。其他平台需要：
-- 用 `JOYCODE_STATE_DB` 环境变量指定 `state.vscdb` 路径，或
+程序通过读取 JoyCode IDE 的登录态文件获取已登录凭据：新版 IDE（0.3+）是 `~/.joycode/auth.json`，旧版是 `state.vscdb`（SQLite）。macOS 上两者路径固定，能自动找到，且 `auth.json` 优先。其他平台需要：
+- Docker 场景把 `auth.json` 或 `state.vscdb` 挂载进容器（见上文挂载说明），旧版 `state.vscdb` 也可用 `JOYCODE_STATE_DB` 环境变量指定路径，或
 - 直接在 Dashboard 扫码 / OAuth 添加账号（推荐）
 </details>
 

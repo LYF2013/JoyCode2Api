@@ -8,6 +8,11 @@ openai-response 模型（GPT-5.6 Sol、GPT-6 Astra）已切换到上游原生 Re
 
 ## 已完成
 
+- **一键导入适配新版 JoyCode IDE（0.3+）登录态**（2026-10-19）
+  - 背景：新版 JoyCode IDE（Electron 版 0.3.1）不再更新 `state.vscdb`，其中存储的 ptKey 已被上游作废（userInfo 返回 401「账号未登录」），导致 Dashboard「一键导入本地JoyCode已登录账户」失效。新版登录态改存 `~/.joycode/auth.json`，其 `tokens.access_token`（71 字符）与旧 ptKey 同格式、实测有效。
+  - 改动：`pkg/auth/credentials.go` 的 `LoadFromSystem` 优先读取 `~/.joycode/auth.json`（容器内 `/root/.joycode/auth.json`），`state.vscdb` 保留为旧版 IDE 回退；`JOYCODE_STATE_DB` 环境变量优先级不变，OAuth 授权登录链路不经过 `LoadFromSystem`、行为不变。一键导入（handler.go）与 OAuth 保存账号的默认模型不再硬编码已下线的 `GLM-5.1`，改为留空走系统默认。README / docker-compose.example.yml 的凭据挂载说明同步更新。
+  - 验证：`go test ./pkg/auth/ ./pkg/dashboard/` 通过；隔离进程复现一键导入链路 `LoadFromSystem → UserInfo` 返回 code=0；`ListModels` 14 个模型正常；`GLM-5.3-jcloud` 实际完成 1 次对话（最小 max_tokens）。
+
 - **openai-response 模型切换原生 Responses 通道 + GPT-6 Astra 打通**（2026-09-11）
   - 根因：GPT-6 Astra 在 chat completions 网关不存在（`6002 模型不存在`），它只在 color 网关 `responses_completions`（rawUrl `/api/saas/openai/v1/responses`）上，要求 label 原名 + 真 Responses 格式（`input` 而非 `messages`）；直连 v1/v2 responses 路径返回 403「请升级版本」，必须走签名网关。
   - 改动：`pkg/joycode/client.go` 加端点映射；新增 `pkg/openai/upstream_responses.go`（嵌套 SSE 解包、chat↔Responses 双向翻译、流式/非流式四个 handler）；`chat.go`/`responses.go` 的 `openai-response` 分支改走原生通道，去掉小写连字符转换。
@@ -53,6 +58,7 @@ openai-response 模型（GPT-5.6 Sol、GPT-6 Astra）已切换到上游原生 Re
 
 ## 待办 / 待确认
 
+- 待验证：Claude 原生通道的 `AnthropicPtKey` 取自 `LoadFromSystem`（serve.go），新版 IDE 下实际读到的是 `auth.json` 的 `access_token`，其对 anthropic 通道是否等价于旧版 state.vscdb 的短 ptKey 未验证。
 - 待确认：`Kimi-K3` 的 Vision 能力和 MaxTokens 上限（`ModelCapabilities` 先按 K2.6 口径填了 16384/200000）；thinking 参数控制是否支持（未加入 `ReasoningModels`）。
 - 待确认：`pkg/anthropic` 的 `TestTranslateRequest_Basic`、`TestResolveModel_UnknownDefaults` 在干净工作区（HEAD）即失败（2026-08-13 发现，2026-09-11 复验），为预存问题，与本次改动无关。
 - 待确认：是否让代理自动做 Claude 模型 label → chatApiModel（`-hq`）映射。当前决定不做，由客户端直接传真实名。

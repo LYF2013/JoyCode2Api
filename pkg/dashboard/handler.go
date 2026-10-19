@@ -642,7 +642,7 @@ func (h *Handler) handleAutoLogin(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := h.store.AddAccount(userID, creds.PtKey, nickname, isDefault, "GLM-5.1"); err != nil {
+	if err := h.store.AddAccount(userID, creds.PtKey, nickname, isDefault, ""); err != nil {
 		slog.Error("auto-login: save account failed", "user_id", userID, "error", err)
 		writeError(w, http.StatusInternalServerError, "保存账号失败: "+err.Error())
 		return
@@ -830,7 +830,7 @@ func (h *Handler) validateAndSavePtKey(ptKey string) (userID, nickname string, e
 		}
 	}
 
-	if saveErr := h.store.AddAccount(userID, ptKey, nickname, isDefault, "GLM-5.1"); saveErr != nil {
+	if saveErr := h.store.AddAccount(userID, ptKey, nickname, isDefault, ""); saveErr != nil {
 		return "", "", fmt.Errorf("save account failed: %w", saveErr)
 	}
 

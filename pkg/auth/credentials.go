@@ -35,14 +35,34 @@ type stateData struct {
 }
 
 const (
-	stateDBEnv       = "JOYCODE_STATE_DB"
-	containerStateDB = "/root/.joycode-ide/state.vscdb"
+	stateDBEnv        = "JOYCODE_STATE_DB"
+	containerStateDB  = "/root/.joycode-ide/state.vscdb"
+	containerAuthJSON = "/root/.joycode/auth.json"
 )
 
-// LoadFromSystem reads ptKey from local JoyCode state database (macOS/Windows/Linux).
+// authFile mirrors ~/.joycode/auth.json written by JoyCode IDE >= 0.3 (Electron).
+type authFile struct {
+	Tokens struct {
+		AccessToken string `json:"access_token"`
+	} `json:"tokens"`
+	UserID        string `json:"userId"`
+	ColorBaseURL  string `json:"color_base_url"`
+	MasterBaseURL string `json:"masterBaseUrl"`
+	Tenant        string `json:"tenant"`
+	LoginType     string `json:"login_type"`
+	OrgFullName   string `json:"orgFullName"`
+}
+
+// LoadFromSystem reads credentials from the local JoyCode IDE login state.
+// Newer JoyCode IDE (>= 0.3) stores the login session in ~/.joycode/auth.json;
+// older versions use the state.vscdb SQLite database. auth.json takes priority,
+// state.vscdb remains as fallback.
 func LoadFromSystem() (*Credentials, error) {
 	if dbPath := os.Getenv(stateDBEnv); dbPath != "" {
 		return loadFromStateDB(dbPath)
+	}
+	if _, err := os.Stat(containerAuthJSON); err == nil {
+		return loadFromAuthJSON(containerAuthJSON)
 	}
 	if _, err := os.Stat(containerStateDB); err == nil {
 		return loadFromStateDB(containerStateDB)
@@ -50,6 +70,13 @@ func LoadFromSystem() (*Credentials, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("cannot determine home directory: %w", err)
+	}
+
+	authJSONPath := filepath.Join(home, ".joycode", "auth.json")
+	if _, err := os.Stat(authJSONPath); err == nil {
+		if creds, loadErr := loadFromAuthJSON(authJSONPath); loadErr == nil {
+			return creds, nil
+		}
 	}
 
 	var dbPath string
@@ -77,6 +104,32 @@ func LoadFromSystem() (*Credentials, error) {
 	}
 
 	return loadFromStateDB(dbPath)
+}
+
+func loadFromAuthJSON(path string) (*Credentials, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read JoyCode auth file %s: %w", path, err)
+	}
+	var data authFile
+	if err := json.Unmarshal(b, &data); err != nil {
+		return nil, fmt.Errorf("cannot parse JoyCode auth file %s: %w", path, err)
+	}
+	if data.Tokens.AccessToken == "" {
+		return nil, fmt.Errorf("access_token is empty in %s\n  Please re-login to JoyCode IDE", path)
+	}
+	if data.UserID == "" {
+		return nil, fmt.Errorf("userId is empty in %s\n  Please re-login to JoyCode IDE", path)
+	}
+	return &Credentials{
+		PtKey:         data.Tokens.AccessToken,
+		UserID:        data.UserID,
+		ColorBaseURL:  data.ColorBaseURL,
+		MasterBaseURL: data.MasterBaseURL,
+		Tenant:        data.Tenant,
+		LoginType:     data.LoginType,
+		OrgFullName:   data.OrgFullName,
+	}, nil
 }
 
 func loadFromStateDB(dbPath string) (*Credentials, error) {
