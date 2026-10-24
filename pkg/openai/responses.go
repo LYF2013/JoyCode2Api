@@ -29,6 +29,7 @@ type ResponsesRequest struct {
 	Temperature   *float64        `json:"temperature,omitempty"`
 	TopP          *float64        `json:"top_p,omitempty"`
 	ParallelTools bool            `json:"parallel_tool_calls,omitempty"`
+	Text          json.RawMessage `json:"text,omitempty"`
 	// Fields we ignore: store, include, reasoning, prompt_cache_key, client_metadata
 }
 

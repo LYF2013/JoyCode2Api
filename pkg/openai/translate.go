@@ -100,11 +100,23 @@ func newShortID() string {
 	return fmt.Sprintf("%d", time.Now().UnixNano()%1e12)
 }
 
+// modelAliases maps internal model slugs sent by Codex CLI to real upstream
+// models. Codex's guardian auto-review requests "gpt-5.6-luna" / "gpt-6-luna"
+// (OpenAI-internal review models) through the configured provider; upstream
+// JoyCode has no such model, so redirect them to the same-generation model.
+var modelAliases = map[string]string{
+	"gpt-5.6-luna": "GPT-5.6 Sol",
+	"gpt-6-luna":   "GPT-6 Sol",
+}
+
 // ResolveModel returns the model to use for the request.
 // If the client-specified model is a known JoyCode model, pass it through.
 // Otherwise fall back to the account's default model, then the global default.
 func ResolveModel(model string, accountDefault string, systemDefault string) string {
 	if model != "" {
+		if alias, ok := modelAliases[model]; ok {
+			return alias
+		}
 		return model
 	}
 	if accountDefault != "" {

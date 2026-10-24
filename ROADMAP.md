@@ -8,6 +8,13 @@ openai-response 模型（GPT-5.6 Sol、GPT-6 Astra）已切换到上游原生 Re
 
 ## 已完成
 
+- **`/v1/responses` 原生通道透传 `text.format` + luna 模型别名，修复 Codex guardian 自动审批失败**（2026-10-24）
+  - 背景：Codex CLI 开启 `approvals_reviewer = "auto_review"` 后，`git fetch` / `git push` 等提权命令由 guardian 审查自动审批；guardian 通过 `/v1/responses` 以 `text.format`（json_schema 严格结构化输出）请求模型返回 `GuardianAssessmentPayload`（`outcome` / `risk_level` / `user_authorization` / `rationale`）。代理存在两个缺陷叠加导致审查必然失败：① `handleResponsesNative` 白名单只转发 `instructions/input/tools/tool_choice/max_output_tokens/temperature/top_p`，丢弃 `text`，模型自由输出、字段对不上；② guardian 用 OpenAI 内部专用模型 `gpt-5.6-luna`（另有 `gpt-6-luna`），上游不存在该模型，代理把上游错误合成为 `output:[]`、0 tokens 的 200 响应，guardian 拿到空响应解析不到评估。表现为 Codex 无法拉取/提交代码（`guardian review completed without an assessment payload`）。
+  - 改动：`pkg/openai/responses.go` 的 `ResponsesRequest` 增加 `Text` 字段；`pkg/openai/upstream_responses.go` 的 `handleResponsesNative` 将非空 `text` 透传给上游；`pkg/openai/translate.go` 的 `ResolveModel` 增加别名表 `gpt-5.6-luna → GPT-5.6 Sol`、`gpt-6-luna → GPT-6 Sol`。默认翻译路径（chat 适配器）不受影响。
+  - 验证：`go build ./...`、`go test ./pkg/openai/` 通过；线上实例实测带 `text.format` json_schema 的请求严格按 schema 返回 `outcome`/`risk_level`/`rationale`；`gpt-5.6-luna` 请求被正确映射并返回真实评估 JSON；`codex exec` 端到端（auto_review 开启）guardian 自动放行 `git ls-remote` 并成功返回远端 HEAD。
+  - 部署：新二进制已替换 `~/JoyCodeProxy/JoyCode2Api-darwin-arm64`（旧版备份为 `_bak_1024`），launchd `com.joycode.proxy` 重启生效。本次部署同时带上了 2026-10-19 的一键导入修复（旧线上二进制为 9 月版，不含该修复）。
+  - 遗留：本机 DNS 对 `api-ai.jd.com` / `github.com` 间歇解析失败（两次服务重启时均触发凭据校验失败，靠 launchd KeepAlive 自愈；codex 沙箱内首次执行也因 DNS 失败）。属环境问题，与代理无关；如需彻底规避可在 plist 加 `--skip-validation`（未改）。
+
 - **一键导入适配新版 JoyCode IDE（0.3+）登录态**（2026-10-19）
   - 背景：新版 JoyCode IDE（Electron 版 0.3.1）不再更新 `state.vscdb`，其中存储的 ptKey 已被上游作废（userInfo 返回 401「账号未登录」），导致 Dashboard「一键导入本地JoyCode已登录账户」失效。新版登录态改存 `~/.joycode/auth.json`，其 `tokens.access_token`（71 字符）与旧 ptKey 同格式、实测有效。
   - 改动：`pkg/auth/credentials.go` 的 `LoadFromSystem` 优先读取 `~/.joycode/auth.json`（容器内 `/root/.joycode/auth.json`），`state.vscdb` 保留为旧版 IDE 回退；`JOYCODE_STATE_DB` 环境变量优先级不变，OAuth 授权登录链路不经过 `LoadFromSystem`、行为不变。一键导入（handler.go）与 OAuth 保存账号的默认模型不再硬编码已下线的 `GLM-5.1`，改为留空走系统默认。README / docker-compose.example.yml 的凭据挂载说明同步更新。

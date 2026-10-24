@@ -665,6 +665,9 @@ func (s *Server) handleResponsesNative(w http.ResponseWriter, r *http.Request, c
 	if req.TopP != nil {
 		body["top_p"] = *req.TopP
 	}
+	if len(req.Text) > 0 {
+		body["text"] = json.RawMessage(req.Text)
+	}
 
 	if req.Stream {
 		s.handleResponsesNativeStream(w, r, client, body, model)
