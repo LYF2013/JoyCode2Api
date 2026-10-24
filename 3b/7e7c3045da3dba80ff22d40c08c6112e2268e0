@@ -1,0 +1,20 @@
+ROADMAP.md
+  h_e96d4b26514466 11-17
+pkg/openai/responses.go
+  h_e96d4b26514466 32
+pkg/openai/translate.go
+  h_e96d4b26514466 103-111,117-119
+pkg/openai/upstream_responses.go
+  h_e96d4b26514466 668-670
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "3b7e7c3045da3dba80ff22d40c08c6112e2268e0",
+  "prompts": {},
+  "humans": {
+    "h_e96d4b26514466": {
+      "author": "liyufei11 <liyufei@jd.com>"
+    }
+  }
+}
