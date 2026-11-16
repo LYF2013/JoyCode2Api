@@ -499,6 +499,11 @@ func (s *Server) handleChatNativeResponsesNonStream(w http.ResponseWriter, r *ht
 		writeError(w, 502, acc.errMsg)
 		return
 	}
+	if !acc.completed && acc.text.Len() == 0 && len(acc.toolCalls) == 0 {
+		slog.Error("native responses chat stream ended without output", "model", model)
+		writeError(w, 502, "上游连接中断，未收到任何输出")
+		return
+	}
 	if acc.inTokens > 0 || acc.outTokens > 0 {
 		store.SetTokenUsage(r, acc.inTokens, acc.outTokens)
 	}
@@ -617,6 +622,10 @@ func (s *Server) handleChatNativeResponsesStream(w http.ResponseWriter, r *http.
 	if acc.errMsg != "" {
 		fmt.Fprintf(w, "data: {\"error\":{\"message\":%s}}\n\n", jsonString(acc.errMsg))
 		flusher.Flush()
+	} else if !acc.completed && acc.text.Len() == 0 && len(acc.toolCalls) == 0 {
+		slog.Error("native responses chat stream ended without output", "model", model)
+		fmt.Fprintf(w, "data: {\"error\":{\"message\":%s}}\n\n", jsonString("上游连接中断，未收到任何输出"))
+		flusher.Flush()
 	} else {
 		ensureRole()
 		finish := acc.finishReason()
@@ -639,6 +648,22 @@ func (s *Server) handleChatNativeResponsesStream(w http.ResponseWriter, r *http.
 // models: the request is already in Responses format and only needs the model
 // label plus upstream envelope fields; the unwrapped upstream events are
 // forwarded as standard SSE.
+// writeFailedResponse emits a standard response.failed SSE event with an
+// error payload so clients (Codex) treat the turn as failed instead of
+// silently completing with empty output and zero usage.
+func writeFailedResponse(w http.ResponseWriter, respID, model, msg string) {
+	writeSSEEvent(w, "response.failed", map[string]interface{}{
+		"response": map[string]interface{}{
+			"id":     respID,
+			"object": "response",
+			"status": "failed",
+			"model":  model,
+			"error":  map[string]interface{}{"code": "upstream_error", "message": msg},
+			"output": []interface{}{},
+		},
+	})
+}
+
 func (s *Server) handleResponsesNative(w http.ResponseWriter, r *http.Request, client *joycode.Client, req *ResponsesRequest, model string) {
 	body := map[string]interface{}{
 		"model":  model,
@@ -667,6 +692,9 @@ func (s *Server) handleResponsesNative(w http.ResponseWriter, r *http.Request, c
 	}
 	if len(req.Text) > 0 {
 		body["text"] = json.RawMessage(req.Text)
+	}
+	if len(req.Reasoning) > 0 {
+		body["reasoning"] = json.RawMessage(req.Reasoning)
 	}
 
 	if req.Stream {
@@ -699,6 +727,11 @@ func (s *Server) handleResponsesNativeNonStream(w http.ResponseWriter, r *http.R
 	}
 	if acc.errMsg != "" {
 		writeError(w, 502, acc.errMsg)
+		return
+	}
+	if !acc.completed && acc.text.Len() == 0 && len(acc.toolCalls) == 0 {
+		slog.Error("native responses stream ended without output", "model", model)
+		writeError(w, 502, "上游连接中断，未收到任何输出")
 		return
 	}
 	if acc.inTokens > 0 || acc.outTokens > 0 {
@@ -746,7 +779,7 @@ func (s *Server) handleResponsesNativeStream(w http.ResponseWriter, r *http.Requ
 	close(stopHeartbeat)
 	<-heartbeatDone
 	if errMsg != "" {
-		writeSSEEvent(w, "error", map[string]interface{}{"message": errMsg})
+		writeFailedResponse(w, "resp_"+newShortID(), model, errMsg)
 		flusher.Flush()
 		fmt.Fprint(w, "data: [DONE]\n\n")
 		flusher.Flush()
@@ -763,14 +796,10 @@ func (s *Server) handleResponsesNativeStream(w http.ResponseWriter, r *http.Requ
 			continue
 		}
 		if msg := upstreamErrorMessage(ev.data); msg != "" {
-			writeSSEEvent(w, "error", map[string]interface{}{"message": msg})
-			flusher.Flush()
-			writeSSEEvent(w, "response.completed", map[string]interface{}{
-				"response": map[string]interface{}{
-					"id": respID, "object": "response", "status": "failed", "model": model,
-					"output": []interface{}{}, "usage": map[string]int{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
-				},
-			})
+			slog.Error("native responses upstream error payload",
+				"model", model, "error", msg,
+				"text_len", acc.text.Len(), "tool_calls", len(acc.toolCalls))
+			writeFailedResponse(w, respID, model, msg)
 			flusher.Flush()
 			break
 		}
@@ -794,20 +823,31 @@ func (s *Server) handleResponsesNativeStream(w http.ResponseWriter, r *http.Requ
 	}
 
 	if !acc.completed && acc.errMsg == "" {
-		slog.Info("native responses stream ended without response.completed, synthesizing",
-			"model", model, "text_len", acc.text.Len(), "tool_calls", len(acc.toolCalls))
-		writeSSEEvent(w, "response.completed", map[string]interface{}{
-			"response": map[string]interface{}{
-				"id": respID, "object": "response", "status": "completed", "model": model,
-				"output": buildFinalOutput("msg_"+newShortID(), acc.text.String(), acc.toolCalls),
-				"usage": map[string]interface{}{
-					"input_tokens":  acc.inTokens,
-					"output_tokens": acc.outTokens,
-					"total_tokens":  acc.inTokens + acc.outTokens,
+		// Upstream dropped the stream before response.completed. With partial
+		// content still deliver it as a completed response so the turn stays
+		// usable; with nothing at all never fake an empty success — emit
+		// response.failed so clients surface the error instead of silently
+		// stopping with a zero-usage completion.
+		if acc.text.Len() == 0 && len(acc.toolCalls) == 0 {
+			slog.Error("native responses stream ended without output, emitting response.failed", "model", model)
+			writeFailedResponse(w, respID, model, "上游连接中断，未收到任何输出")
+			flusher.Flush()
+		} else {
+			slog.Warn("native responses stream ended without response.completed, synthesizing completion with partial output",
+				"model", model, "text_len", acc.text.Len(), "tool_calls", len(acc.toolCalls))
+			writeSSEEvent(w, "response.completed", map[string]interface{}{
+				"response": map[string]interface{}{
+					"id": respID, "object": "response", "status": "completed", "model": model,
+					"output": buildFinalOutput("msg_"+newShortID(), acc.text.String(), acc.toolCalls),
+					"usage": map[string]interface{}{
+						"input_tokens":  acc.inTokens,
+						"output_tokens": acc.outTokens,
+						"total_tokens":  acc.inTokens + acc.outTokens,
+					},
 				},
-			},
-		})
-		flusher.Flush()
+			})
+			flusher.Flush()
+		}
 	}
 
 	fmt.Fprint(w, "data: [DONE]\n\n")

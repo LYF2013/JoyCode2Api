@@ -30,7 +30,8 @@ type ResponsesRequest struct {
 	TopP          *float64        `json:"top_p,omitempty"`
 	ParallelTools bool            `json:"parallel_tool_calls,omitempty"`
 	Text          json.RawMessage `json:"text,omitempty"`
-	// Fields we ignore: store, include, reasoning, prompt_cache_key, client_metadata
+	Reasoning     json.RawMessage `json:"reasoning,omitempty"`
+	// Fields we ignore: store, include, prompt_cache_key, client_metadata
 }
 
 // responsesInputItem represents one entry in the Responses API "input" array.
