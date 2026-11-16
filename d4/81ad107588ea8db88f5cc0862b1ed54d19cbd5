@@ -1,0 +1,18 @@
+pkg/openai/responses.go
+  h_e96d4b26514466 33-34
+pkg/openai/upstream_responses.go
+  h_e96d4b26514466 502-506,625-628,651-666,696-698,732-736,782,799-802,826-846,848-850
+pkg/openai/upstream_responses_test.go
+  h_e96d4b26514466 1-146
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "d481ad107588ea8db88f5cc0862b1ed54d19cbd5",
+  "prompts": {},
+  "humans": {
+    "h_e96d4b26514466": {
+      "author": "liyufei11 <liyufei@jd.com>"
+    }
+  }
+}
