@@ -63,6 +63,25 @@ func (s *Server) handleNonStreamChat(w http.ResponseWriter, r *http.Request, cli
 		writeError(w, code, msg)
 		return
 	}
+	// The gateway reports minute-level quota rejections as HTTP 200 with the
+	// error in the body ({"error":{"cause":"tokens limit for minute",
+	// "code":429,"message":"访问限制","status":"RATE_LIMIT"}}). Surface those
+	// as a real 429 so standard clients back off and retry instead of seeing
+	// a bogus empty completion.
+	if errObj, ok := resp["error"].(map[string]interface{}); ok {
+		if cause := rateLimitCause(errObj); cause != "" {
+			slog.Warn("chat upstream rate limited", "model", model, "cause", cause)
+			w.Header().Set("Retry-After", "60")
+			writeJSON(w, 429, map[string]interface{}{
+				"error": map[string]interface{}{
+					"message": "上游限流（" + cause + "），请稍后重试",
+					"type":    "rate_limit_error",
+					"code":    "rate_limit_exceeded",
+				},
+			})
+			return
+		}
+	}
 	if usage, ok := resp["usage"].(map[string]interface{}); ok {
 		inTk, _ := usage["prompt_tokens"].(float64)
 		outTk, _ := usage["completion_tokens"].(float64)
@@ -147,6 +166,31 @@ func (s *Server) handleStreamChat(w http.ResponseWriter, r *http.Request, client
 		if strings.Contains(line, "[DONE]") {
 			sawDone = true
 		}
+		// Same 200-with-error-body quota rejection as the non-stream path;
+		// the status code is already committed, so surface it as a standard
+		// OpenAI SSE error event with rate-limit semantics.
+		if strings.HasPrefix(line, "data: ") && strings.Contains(line, "RATE_LIMIT") {
+			var env struct {
+				Error map[string]interface{} `json:"error"`
+			}
+			if json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &env) == nil {
+				if cause := rateLimitCause(env.Error); cause != "" {
+					slog.Warn("chat upstream rate limited", "model", model, "cause", cause)
+					payload, _ := json.Marshal(map[string]interface{}{
+						"error": map[string]interface{}{
+							"message": "上游限流（" + cause + "），请稍后重试",
+							"type":    "rate_limit_error",
+							"code":    "rate_limit_exceeded",
+						},
+					})
+					fmt.Fprintf(w, "data: %s\n\n", payload)
+					flusher.Flush()
+					fmt.Fprint(w, "data: [DONE]\n\n")
+					flusher.Flush()
+					return
+				}
+			}
+		}
 		w.Write([]byte(line))
 		w.Write([]byte("\n"))
 		flusher.Flush()
@@ -182,4 +226,26 @@ func (s *Server) handleStreamChat(w http.ResponseWriter, r *http.Request, client
 
 func isTimeoutError(msg string) bool {
 	return common.IsTimeoutError(errors.New(msg))
+}
+
+// rateLimitCause extracts the quota-rejection cause from an upstream error
+// object ("status":"RATE_LIMIT" or "code":429), e.g. "tokens limit for
+// minute" / "访问限制". Returns "" when the error is not a rate limit.
+func rateLimitCause(errObj map[string]interface{}) string {
+	if errObj == nil {
+		return ""
+	}
+	status, _ := errObj["status"].(string)
+	code, _ := errObj["code"].(float64)
+	if status != "RATE_LIMIT" && code != 429 {
+		return ""
+	}
+	cause, _ := errObj["cause"].(string)
+	if cause == "" {
+		cause, _ = errObj["message"].(string)
+	}
+	if cause == "" {
+		cause = "访问限制"
+	}
+	return cause
 }

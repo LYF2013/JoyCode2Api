@@ -2,6 +2,7 @@ package openai
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -325,6 +326,84 @@ func TestChat_ValidNonStream(t *testing.T) {
 	}
 	if result["object"] != "chat.completion" {
 		t.Errorf("expected object=chat.completion, got %v", result["object"])
+	}
+}
+
+// The gateway reports minute-level quota rejections as HTTP 200 with the error
+// in the body; non-stream requests must surface them as a real 429 with
+// Retry-After so standard clients back off and retry.
+func TestChat_NonStream_RateLimit_Returns429(t *testing.T) {
+	srv, cleanup := setupOpenAIServer(map[string]interface{}{
+		"/api/saas/openai/v1/chat/completions": map[string]interface{}{
+			"error": map[string]interface{}{
+				"cause": "tokens limit for minute", "code": 429,
+				"message": "访问限制", "status": "RATE_LIMIT",
+			},
+			"requestId": "req-1", "result": nil,
+		},
+	})
+	defer cleanup()
+
+	body := `{"model":"JoyAI-Code","messages":[{"role":"user","content":"hi"}],"stream":false}`
+	resp, err := http.Post(
+		srv.URL+"/v1/chat/completions",
+		"application/json",
+		strings.NewReader(body),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 429 {
+		raw, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 429, got %d: %s", resp.StatusCode, raw)
+	}
+	if resp.Header.Get("Retry-After") != "60" {
+		t.Errorf("expected Retry-After: 60, got %q", resp.Header.Get("Retry-After"))
+	}
+	var result struct {
+		Error struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Error.Type != "rate_limit_error" {
+		t.Errorf("expected type=rate_limit_error, got %q", result.Error.Type)
+	}
+	if !strings.Contains(result.Error.Message, "tokens limit for minute") {
+		t.Errorf("expected upstream cause in message, got %q", result.Error.Message)
+	}
+}
+
+// Same quota rejection on a stream: the 200 status is already committed, so it
+// must be surfaced as a standard OpenAI SSE error event with rate-limit
+// semantics instead of forwarding the raw gateway error body.
+func TestChat_Stream_RateLimit_EmitsStandardError(t *testing.T) {
+	srv, backend := nativeTestServer(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		fmt.Fprint(w, "data: {\"error\":{\"cause\":\"request limit for minute\",\"code\":429,\"message\":\"访问限制\",\"status\":\"RATE_LIMIT\"},\"requestId\":\"req-1\",\"result\":null}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	})
+	defer backend.Close()
+
+	rec := httptest.NewRecorder()
+	jcBody := map[string]interface{}{"model": "JoyAI-Code", "stream": true,
+		"messages": []interface{}{map[string]interface{}{"role": "user", "content": "hi"}}}
+	srv.handleStreamChat(rec, newNativeRequest(), srv.Client, jcBody, "JoyAI-Code")
+
+	out := rec.Body.String()
+	if !strings.Contains(out, `"type":"rate_limit_error"`) {
+		t.Errorf("expected rate_limit_error event, got:\n%s", out)
+	}
+	if !strings.Contains(out, "request limit for minute") {
+		t.Errorf("expected upstream cause in error event, got:\n%s", out)
+	}
+	if strings.Contains(out, `"status":"RATE_LIMIT"`) {
+		t.Errorf("raw gateway error body must not be forwarded as-is:\n%s", out)
 	}
 }
 

@@ -144,3 +144,88 @@ func TestResponsesNative_ForwardsReasoning(t *testing.T) {
 		t.Errorf("expected forwarded response.completed, got:\n%s", rec.Body.String())
 	}
 }
+
+// An Azure resource-affinity rejection (history items created under another
+// Azure OpenAI resource) must be retried once with the input item ids
+// stripped, so long-running conversations keep working instead of failing
+// every retry.
+func TestNativeResponsesStream_AzureResourceError_RetriesWithoutIDs(t *testing.T) {
+	var requests int
+	var retryBody map[string]interface{}
+	srv, backend := nativeTestServer(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		if requests == 1 {
+			io.WriteString(w, sseLines(
+				`{"error":{"cause":"The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it.","code":400,"message":"模型服务调用失败","status":"FAILED_RESPONSE"}`,
+			))
+			return
+		}
+		b, _ := io.ReadAll(r.Body)
+		json.Unmarshal(b, &retryBody)
+		io.WriteString(w, sseLines(
+			`{"type":"response.output_text.delta","delta":"ok"}`,
+			`{"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}`,
+		))
+	})
+	defer backend.Close()
+
+	rec := httptest.NewRecorder()
+	body := map[string]interface{}{"model": "GPT-6 Astra", "stream": true,
+		"input": []interface{}{
+			map[string]interface{}{"type": "reasoning", "id": "rs_1", "encrypted_content": "blob"},
+			map[string]interface{}{"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "f", "arguments": "{}"},
+			map[string]interface{}{"type": "function_call_output", "id": "fco_1", "call_id": "call_1", "output": "out"},
+		}}
+	srv.handleResponsesNativeStream(rec, newNativeRequest(), srv.Client, body, "GPT-6 Astra")
+
+	if requests != 2 {
+		t.Fatalf("expected 2 upstream attempts, got %d", requests)
+	}
+	input, _ := retryBody["input"].([]interface{})
+	if len(input) != 3 {
+		t.Fatalf("expected 3 input items in retry body, got %d", len(input))
+	}
+	for i, it := range input {
+		m, _ := it.(map[string]interface{})
+		if m["type"] == "function_call_output" {
+			if m["id"] != "fco_1" {
+				t.Errorf("function_call_output id must be kept, got %v", m["id"])
+			}
+			continue
+		}
+		if _, has := m["id"]; has {
+			t.Errorf("input item %d (type=%v) should have id stripped: %v", i, m["type"], m["id"])
+		}
+	}
+	out := rec.Body.String()
+	if !strings.Contains(out, `"type":"response.completed"`) {
+		t.Errorf("expected response.completed after retry, got:\n%s", out)
+	}
+}
+
+// The affinity failure sometimes surfaces as a bare empty stream instead of
+// the error payload; that must also be retried once, and still-empty after
+// the retry surfaces response.failed as before.
+func TestNativeResponsesStream_EmptyUpstream_RetriesOnceThenFails(t *testing.T) {
+	var requests int
+	srv, backend := nativeTestServer(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+	})
+	defer backend.Close()
+
+	rec := httptest.NewRecorder()
+	body := map[string]interface{}{"model": "GPT-6 Astra", "stream": true,
+		"input": []interface{}{map[string]interface{}{"type": "message", "role": "user", "id": "msg_1"}}}
+	srv.handleResponsesNativeStream(rec, newNativeRequest(), srv.Client, body, "GPT-6 Astra")
+
+	if requests != 2 {
+		t.Errorf("expected 2 upstream attempts (one retry), got %d", requests)
+	}
+	if !strings.Contains(rec.Body.String(), `"type":"response.failed"`) {
+		t.Errorf("expected response.failed after retry exhaustion, got:\n%s", rec.Body.String())
+	}
+}

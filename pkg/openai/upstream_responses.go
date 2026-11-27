@@ -453,22 +453,122 @@ func startKeepalive(w http.ResponseWriter, flusher http.Flusher) (stop chan stru
 	return stop, done
 }
 
+// isAzureResourceError reports whether an upstream error payload is the Azure
+// Responses API resource-affinity rejection. The gateway load-balances across
+// Azure OpenAI resources; history items created under one resource are
+// rejected when the request lands on another ("...created under a different
+// Azure OpenAI resource..."), killing the stream before any output.
+func isAzureResourceError(data string) bool {
+	return strings.Contains(data, "different Azure OpenAI resource")
+}
+
+// stripInputItemIDs returns a copy of body with the "id" field removed from
+// every input item except function_call_output. Azure's resource-affinity
+// check keys on the server-generated item ids; dropping them lets a request
+// referencing items from another resource be accepted while keeping the
+// history content intact.
+func stripInputItemIDs(body map[string]interface{}) map[string]interface{} {
+	var items []interface{}
+	switch input := body["input"].(type) {
+	case []interface{}:
+		items = input
+	case json.RawMessage:
+		if json.Unmarshal(input, &items) != nil {
+			return body
+		}
+	default:
+		return body
+	}
+	changed := false
+	for i, it := range items {
+		m, ok := it.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if t, _ := m["type"].(string); t == "function_call_output" {
+			continue
+		}
+		if _, has := m["id"]; !has {
+			continue
+		}
+		if !changed {
+			clone := make([]interface{}, len(items))
+			copy(clone, items)
+			items = clone
+			changed = true
+		}
+		item := make(map[string]interface{}, len(m))
+		for k, v := range m {
+			item[k] = v
+		}
+		delete(item, "id")
+		items[i] = item
+	}
+	if !changed {
+		return body
+	}
+	stripped := make(map[string]interface{}, len(body))
+	for k, v := range body {
+		stripped[k] = v
+	}
+	stripped["input"] = items
+	return stripped
+}
+
 // openUpstreamResponses connects to the native Responses endpoint and returns
 // the unwrapped event channel. On failure it returns an error message suitable
 // for surfacing to the client.
+//
+// The first event is peeked to detect the Azure resource-affinity failure (or
+// a stream that dies before producing anything): such streams are retried once
+// with the input item ids stripped, which lets conversations that reference
+// items created under another Azure resource keep working instead of failing
+// every retry.
 func openUpstreamResponses(client *joycode.Client, body map[string]interface{}, model string) (<-chan upstreamEvent, func(), string) {
-	resp, err := client.PostStream(responsesUpstreamEndpoint, body)
-	if err != nil {
-		slog.Error("native responses upstream error", "model", model, "error", err)
-		msg := err.Error()
-		if isTimeoutError(msg) {
-			msg = "上游服务响应超时，请稍后重试。原始错误: " + msg
+	for attempt := 0; ; attempt++ {
+		resp, err := client.PostStream(responsesUpstreamEndpoint, body)
+		if err != nil {
+			slog.Error("native responses upstream error", "model", model, "error", err)
+			msg := err.Error()
+			if isTimeoutError(msg) {
+				msg = "上游服务响应超时，请稍后重试。原始错误: " + msg
+			}
+			return nil, nil, msg
 		}
-		return nil, nil, msg
+		events := make(chan upstreamEvent, 64)
+		go unwrapResponsesStream(resp.Body, events)
+
+		first, ok := <-events
+		if (ok && !isAzureResourceError(first.data)) || attempt >= 1 {
+			if !ok {
+				// Empty stream (already closed): the caller reports it as
+				// "ended without output" as before.
+				return events, func() { resp.Body.Close() }, ""
+			}
+			merged := make(chan upstreamEvent, 64)
+			merged <- first
+			go func() {
+				defer close(merged)
+				for ev := range events {
+					merged <- ev
+				}
+			}()
+			return merged, func() { resp.Body.Close() }, ""
+		}
+
+		resp.Body.Close()
+		go func() { // drain the unwrap goroutine so it exits cleanly
+			for range events {
+			}
+		}()
+		reason := "empty stream"
+		if ok {
+			reason = "azure resource affinity"
+		}
+		slog.Warn("responses upstream rejected stream, retrying without input item ids",
+			"model", model, "reason", reason, "attempt", attempt+1)
+		body = stripInputItemIDs(body)
 	}
-	events := make(chan upstreamEvent, 64)
-	go unwrapResponsesStream(resp.Body, events)
-	return events, func() { resp.Body.Close() }, ""
 }
 
 // handleChatViaNativeResponses serves /v1/chat/completions (stream and
