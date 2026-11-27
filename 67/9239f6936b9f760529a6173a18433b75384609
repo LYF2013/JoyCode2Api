@@ -1,0 +1,31 @@
+pkg/openai/chat.go
+  s_fd2aef150547f6::t_02bde7ad690c85 66-84,169-193,230-251
+pkg/openai/handler_test.go
+  s_fb98d22b6e1c45::t_5dd9d6b5139a81 5,332-409
+pkg/openai/upstream_responses.go
+  s_fd2aef150547f6::t_0edbb3026a8699 456-517,521-526,528-571
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "679239f6936b9f760529a6173a18433b75384609",
+  "prompts": {},
+  "sessions": {
+    "s_fb98d22b6e1c45": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a21715-cc7c-73a0-b1e8-f5727d8912d3",
+        "model": "GPT-6 Astra"
+      },
+      "human_author": "liyufei11 <liyufei@jd.com>"
+    },
+    "s_fd2aef150547f6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a21707-43bc-7f00-9d88-5f59ab7fc6e9",
+        "model": "GPT-6 Astra"
+      },
+      "human_author": "liyufei11 <liyufei@jd.com>"
+    }
+  }
+}
